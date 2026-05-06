@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Tank PvP - Mobile Friendly</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+body { margin:0; overflow:hidden; background:#87ceeb; touch-action: none; }
+#ui {
+    position: absolute;
+    top: 10px; left: 10px;
+    color: white;
+    font-family: Arial;
+    font-size: 12px;
+    z-index: 10;
+}
+#controls {
+    position: absolute;
+    bottom: 10px; left: 10px;
+    color: white;
+    font-family: Arial;
+    font-size: 10px;
+}
+</style>
+</head>
+<body>
+
+<div id="ui">HP: 1000</div>
+<div id="controls">Mobile: Touch to move & aim, Double tap to shoot</div>
+
+<script>
+
+// =====================
+// BASIC SETUP
+// =====================
+let scene, camera, renderer;
+let tanks = [];
+let bullets = [];
+let playerTank;
+let keys = {};
+let isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+let touchStartTime = 0;
+
+// =====================
+// INIT
+// =====================
+function init(){
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87ceeb);
+
+    camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 2000);
+
+    renderer = new THREE.WebGLRenderer();
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 1));
+
+    const ground = new THREE.Mesh(
+        new THREE.PlaneGeometry(500,500),
+        new THREE.MeshStandardMaterial({color:0x3f6212})
+    );
+    ground.rotation.x = -Math.PI/2;
+    scene.add(ground);
+
+    // spawn tanks
+    for(let i=0;i<5;i++){
+        createTank(-40+i*10, -20, "A");
+        createTank(-40+i*10,  20, "B");
+    }
+
+    // player is first tank
+    playerTank = tanks[0];
+    playerTank.userData.isPlayer = true;
+    playerTank.material.color.setHex(0x00ff00); // green for player
+
+    // controls
+    if(isMobile){
+        window.addEventListener('touchstart', onTouchStart);
+        window.addEventListener('touchmove', onTouchMove);
+        window.addEventListener('touchend', onTouchEnd);
+    } else {
+        window.addEventListener('keydown', (e) => keys[e.code] = true);
+        window.addEventListener('keyup', (e) => keys[e.code] = false);
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('click', onClick);
+    }
+
+    loop();
+}
+
+// =====================
+// TANK
+// =====================
+function createTank(x,z,team){
+
+    const tank = new THREE.Mesh(
+        new THREE.BoxGeometry(3,1,6),
+        new THREE.MeshStandardMaterial({
+            color: team==="A"?0x3b82f6:0xef4444
+        })
+    );
+
+    tank.position.set(x,0,z);
+
+    tank.userData = {
+        team,
+        hp: 1000,
+        reload: 0,
+        speed: 0.15 + Math.random()*0.05,
+        isPlayer: false
+    };
+
+    // turret
+    const turret = new THREE.Object3D();
+    tank.add(turret);
+    tank.turret = turret;
+
+    scene.add(tank);
+    tanks.push(tank);
+
+    return tank;
+}
+
+// =====================
+// FIND TARGET
+// =====================
+function getTarget(tank){
+    let best=null, bestD=99999;
+
+    for(let t of tanks){
+        if(t.userData.team === tank.userData.team) continue;
+        if(t.userData.hp<=0) continue;
+
+        const d = tank.position.distanceTo(t.position);
+        if(d < bestD){
+            bestD = d;
+            best = t;
+        }
+    }
+    return best;
+}
+
+// =====================
+// SHOOT
+// =====================
+function shoot(tank, target){
+
+    if(tank.userData.reload > 0) return;
+
+    const bullet = new THREE.Mesh(
+        new THREE.SphereGeometry(0.2),
+        new THREE.MeshBasicMaterial({color:0xffcc00})
+    );
+
+    const pos = new THREE.Vector3();
+    tank.getWorldPosition(pos);
+
+    const dir = target.clone().sub(pos).normalize();
+
+    bullet.position.copy(pos);
+    bullet.userData = {
+        vel: dir.multiplyScalar(2.2),
+        target: target
+    };
+
+    scene.add(bullet);
+    bullets.push(bullet);
+
+    tank.userData.reload = 1.0; // player reload
+}
+
+// =====================
+// PLAYER UPDATE
+// =====================
+function updatePlayer(){
+    if(playerTank.userData.hp <= 0) return;
+
+    // movement
+    if(keys.KeyW) playerTank.translateZ(0.2);
+    if(keys.KeyS) playerTank.translateZ(-0.2);
+    if(keys.KeyA) playerTank.rotation.y += 0.05;
+    if(keys.KeyD) playerTank.rotation.y -= 0.05;
+
+    // camera follow
+    const offset = new THREE.Vector3(0, 50, 30);
+    offset.applyAxisAngle(new THREE.Vector3(0,1,0), playerTank.rotation.y);
+    camera.position.copy(playerTank.position).add(offset);
+    camera.lookAt(playerTank.position);
+
+    // reload
+    playerTank.userData.reload -= 0.016;
+
+    // update UI
+    let controlText = isMobile ? "Mobile: Touch to move & aim, Double tap to shoot" : "Desktop: WASD move, Mouse aim, Click shoot";
+    document.getElementById('ui').innerText = `HP: ${playerTank.userData.hp}`;
+    document.getElementById('controls').innerText = controlText;
+}
+
+// =====================
+// AI UPDATE
+// =====================
+function updateTank(t){
+
+    if(t.userData.hp <= 0 || t.userData.isPlayer) return;
+
+    const target = getTarget(t);
+    if(!target) return;
+
+    const dir = target.position.clone().sub(t.position);
+    const dist = dir.length();
+
+    const angle = Math.atan2(dir.x, dir.z);
+
+    // rotate turret smoothly
+    t.turret.rotation.y += (angle - t.turret.rotation.y)*0.08;
+
+    // movement AI
+    if(dist > 60){
+        t.translateZ(t.userData.speed);
+    }
+    else if(dist < 30){
+        t.translateZ(-t.userData.speed*0.6);
+    }
+    else {
+        t.rotation.y += 0.01;
+    }
+
+    // fire logic
+    if(t.userData.reload <= 0 && Math.abs(t.turret.rotation.y - angle) < 0.25){
+        shoot(t, target.position);
+        t.userData.reload = 1.5 + Math.random()*1.5;
+    }
+
+    t.userData.reload -= 0.016;
+}
+
+// =====================
+// BULLETS
+// =====================
+function updateBullets(){
+
+    for(let i=bullets.length-1;i>=0;i--){
+        const b = bullets[i];
+
+        b.position.add(b.userData.vel);
+
+        // check hit
+        for(let t of tanks){
+            if(t.userData.hp > 0 && b.position.distanceTo(t.position) < 2.5){
+                t.userData.hp -= 250;
+                scene.remove(b);
+                bullets.splice(i,1);
+                break;
+            }
+        }
+
+        // remove far bullets
+        if(b.position.length() > 500){
+            scene.remove(b);
+            bullets.splice(i,1);
+        }
+    }
+}
+
+// =====================
+// DESKTOP CONTROLS
+// =====================
+function onMouseMove(event){
+    const mouse = new THREE.Vector2();
+    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(mouse, camera);
+
+    const plane = new THREE.Plane(new THREE.Vector3(0,1,0), 0);
+    const target = new THREE.Vector3();
+    raycaster.ray.intersectPlane(plane, target);
+
+    const dir = target.sub(playerTank.position);
+    const angle = Math.atan2(dir.x, dir.z);
+    playerTank.turret.rotation.y = angle;
+}
+
+function onClick(){
+    const target = new THREE.Vector3();
+    const dir = new THREE.Vector3(0,0,1);
+    dir.applyAxisAngle(new THREE.Vector3(0,1,0), playerTank.turret.rotation.y);
+    target.copy(playerTank.position).add(dir.multiplyScalar(100));
+
+    shoot(playerTank, target);
+}
+
+// =====================
+// MOBILE CONTROLS
+// =====================
+function onTouchStart(event){
+    event.preventDefault();
+    touchStartTime = Date.now();
+}
+
+function onTouchMove(event){
+    event.preventDefault();
+    if(event.touches.length > 0){
+        const touch = event.touches[0];
+        const mouse = new THREE.Vector2();
+        mouse.x = (touch.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(touch.clientY / window.innerHeight) * 2 + 1;
+
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(mouse, camera);
+
+        const plane = new THREE.Plane(new THREE.Vector3(0,1,0), 0);
+        const target = new THREE.Vector3();
+        raycaster.ray.intersectPlane(plane, target);
+
+        // aim turret
+        const dir = target.sub(playerTank.position);
+        const angle = Math.atan2(dir.x, dir.z);
+        playerTank.turret.rotation.y = angle;
+
+        // move towards touch
+        const moveDir = target.sub(playerTank.position).normalize();
+        playerTank.position.add(moveDir.multiplyScalar(0.1));
+    }
+}
+
+function onTouchEnd(event){
+    event.preventDefault();
+    const touchDuration = Date.now() - touchStartTime;
+    if(touchDuration < 300){ // quick tap
+        const target = new THREE.Vector3();
+        const dir = new THREE.Vector3(0,0,1);
+        dir.applyAxisAngle(new THREE.Vector3(0,1,0), playerTank.turret.rotation.y);
+        target.copy(playerTank.position).add(dir.multiplyScalar(100));
+        shoot(playerTank, target);
+    }
+}
+
+// =====================
+// LOOP
+// =====================
+function loop(){
+    requestAnimationFrame(loop);
+
+    updatePlayer();
+    for(let t of tanks) updateTank(t);
+    updateBullets();
+
+    renderer.render(scene, camera);
+}
+
+init();
+
+</script>
+
+</body>
+</html>
